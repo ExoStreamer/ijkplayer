@@ -1,4 +1,5 @@
 # -----
+/ijkplayer.si4project/
 build/
 ffmpeg-temp/
 android/ffmpeg-*
