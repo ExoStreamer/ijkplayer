@@ -606,6 +606,9 @@ int ijkmp_get_state(IjkMediaPlayer *mp)
     return mp->mp_state;
 }
 
+
+
+
 static long ijkmp_get_current_position_l(IjkMediaPlayer *mp)
 {
     if (mp->seek_req)
@@ -624,6 +627,22 @@ long ijkmp_get_current_position(IjkMediaPlayer *mp)
         retval = ijkmp_get_current_position_l(mp);
     pthread_mutex_unlock(&mp->mutex);
     return retval;
+}
+
+static int ijkmp_get_current_frame_l(IjkMediaPlayer *mp, uint8_t *frame_buf)//Added By ExoStreamer
+{
+	return ffp_get_current_frame(mp->ffplayer, frame_buf);
+}
+
+int ijkmp_get_current_frame(IjkMediaPlayer *mp, uint8_t *frame_buf)//Added By ExoStreamer
+{
+	if(mp == NULL) {
+		return -1;
+	}
+	pthread_mutex_lock(&mp->mutex);
+	int retVal = ijkmp_get_current_frame_l(mp, frame_buf);
+	pthread_mutex_unlock(&mp->mutex);
+	return retVal;
 }
 
 static long ijkmp_get_duration_l(IjkMediaPlayer *mp)

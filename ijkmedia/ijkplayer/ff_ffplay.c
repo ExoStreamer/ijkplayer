@@ -107,7 +107,6 @@
 #include "ff_ffplay_options.h"
 
 static AVPacket flush_pkt;
-
 #if CONFIG_AVFILTER
 // FFP_MERGE: opt_add_vfilter
 #endif
@@ -115,6 +114,189 @@ static AVPacket flush_pkt;
 #define IJKVERSION_GET_MAJOR(x)     ((x >> 16) & 0xFF)
 #define IJKVERSION_GET_MINOR(x)     ((x >>  8) & 0xFF)
 #define IJKVERSION_GET_MICRO(x)     ((x      ) & 0xFF)
+
+static void ffp_show_dict(FFPlayer *ffp, const char *tag, AVDictionary *dict);
+
+static int exo_check_drop_video_queue_pts(PacketQueue *q, int64_t target_drop_to_pts) {
+	MyAVPacketList *pkt1 = NULL;
+	int iFrameCount = 0;
+	pkt1 = q->first_pkt;
+	int64_t final_drop_to_pts = 0;
+	//OPT lw.tan
+	int isHaveKeyFramePtsLargeThenTargetPts = 0;
+    for (;;) {
+        if (!pkt1) {
+            break;
+        }
+		int isKeyFrame = (pkt1->pkt.flags & AV_PKT_FLAG_KEY);
+		if (isKeyFrame) {
+			iFrameCount++;
+			if (pkt1->pkt.pts >= target_drop_to_pts) {
+				isHaveKeyFramePtsLargeThenTargetPts = 1;
+				break;
+			}
+		}
+		//av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->judge_drop_queue_pts, isKeyFrame = %d, current_pts = %lld, target_pts = %lld\n", isKeyFrame, pkt1->pkt.pts, target_drop_to_pts);
+        pkt1 = pkt1->next;
+    }
+	if (isHaveKeyFramePtsLargeThenTargetPts) {
+		final_drop_to_pts = target_drop_to_pts;
+	}
+	else {
+		if (iFrameCount > 0) {
+			pkt1 = q->first_pkt;
+			int64_t* iFramePtsVaule = (int64_t*)malloc(iFrameCount * sizeof(int64_t));
+			int index = 0;
+			for (;;) {
+		        if (!pkt1) {
+		            break;
+		        }
+				int isKeyFrame = (pkt1->pkt.flags & AV_PKT_FLAG_KEY);
+				if (isKeyFrame) {
+					iFramePtsVaule[index++] = pkt1->pkt.pts;
+				}
+		        pkt1 = pkt1->next;
+			}
+			final_drop_to_pts = iFramePtsVaule[iFrameCount - 1];
+			free(iFramePtsVaule);
+			iFramePtsVaule = NULL;
+		}
+		else {
+			final_drop_to_pts = 0;
+		}
+	}
+	return final_drop_to_pts;
+}
+
+//Added By ExoStreamer for low delay start
+
+/**
+    refer: https://www.jianshu.com/p/ecf51ee32589
+	       https://www.jianshu.com/p/d6a5d8756eec?utm_campaign=hugo&utm_medium=reader_share&utm_content=note&utm_source=qq
+  */
+static void exo_drop_queue_until_pts(int type, PacketQueue *q, int64_t drop_to_pts) {
+    MyAVPacketList *pkt1 = NULL;
+    int del_nb_packets = 0;
+    av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->PacketQueue->duration %lld", q->duration);
+	if (drop_to_pts <= 0){
+		av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->print drop frame result, type = %s, del_nb_packets = 0, drop_to_pts = 0\n", (type == 0) ? "audio" : "video");
+		return;
+	}
+    for (;;) {
+        pkt1 = q->first_pkt;
+        if (!pkt1) {
+            break;
+        }
+		int isKeyFrame = (pkt1->pkt.flags & AV_PKT_FLAG_KEY);
+        if (isKeyFrame && pkt1->pkt.pts >= drop_to_pts) {
+            break;
+        }
+        q->first_pkt = pkt1->next;
+        if (!q->first_pkt)
+            q->last_pkt = NULL;
+        q->nb_packets--;
+        ++del_nb_packets;
+        q->size -= pkt1->pkt.size + sizeof(*pkt1);
+        if (pkt1->pkt.duration > 0)
+            q->duration -= pkt1->pkt.duration;
+        av_free_packet(&pkt1->pkt);
+#ifdef FFP_MERGE
+        av_free(pkt1);
+#else
+        pkt1->next = q->recycle_pkt;
+        q->recycle_pkt = pkt1;
+#endif
+    }
+	av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->print drop frame result, type = %s, del_nb_packets = %d packate queue duration = %lld\n", (type == 0) ? "audio" : "video", del_nb_packets, q->duration);
+}
+
+static void exo_control_video_queue_duration(FFPlayer *ffp, VideoState *is) {
+    int video_time_base_valid = 0;
+    int64_t cached_duration = -1;
+    int nb_packets = 0;
+    int64_t drop_to_pts = 0;
+    SDL_LockMutex(is->videoq.mutex);
+    video_time_base_valid = is->video_st->time_base.den > 0 && is->video_st->time_base.num > 0;
+    nb_packets = is->videoq.nb_packets;
+    if (video_time_base_valid) {
+		if (is->videoq.first_pkt && is->videoq.last_pkt) {
+			int64_t duration = is->videoq.last_pkt->pkt.pts - is->videoq.first_pkt->pkt.pts;
+			cached_duration = duration * av_q2d(is->video_st->time_base) * 1000;
+		}
+    }
+    if (ffp->max_cached_duration > 0 && cached_duration > (ffp->max_cached_duration)) {
+		av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->print drop frame (video)----------------->start\n");
+		int64_t diff_pts  = cached_duration - ffp->max_cached_duration;
+        drop_to_pts = is->videoq.first_pkt->pkt.pts + IJKMAX(0, diff_pts);
+		int64_t final_drop_to_pts = exo_check_drop_video_queue_pts(&is->videoq, drop_to_pts);
+		av_log(NULL, AV_LOG_DEBUG,
+			"ExoStreamer->ffplay->print video cached_duration = %lld, max_cached_duration = %lld, first_pk_pts = %lld, last_pk_pts = %lld, nb_packets = %d, target drop_to_pts = %lld, final drop_to_pts = %lld, diff_pts = %lld\n",
+			cached_duration,
+			ffp->max_cached_duration,
+			is->videoq.first_pkt->pkt.pts,
+			is->videoq.last_pkt->pkt.pts,
+			nb_packets,
+			drop_to_pts,
+			final_drop_to_pts,
+			diff_pts);
+		exo_drop_queue_until_pts(1, &is->videoq, IJKMIN(final_drop_to_pts, drop_to_pts));
+		av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->print drop frame (video)----------------->end\n");
+    }
+    SDL_UnlockMutex(is->videoq.mutex);
+}
+
+static void exo_control_audio_queue_duration(FFPlayer *ffp, VideoState *is) {
+    int audio_time_base_valid = 0;
+    int64_t cached_duration = -1;
+    int nb_packets = 0;
+    int64_t drop_to_pts = 0;
+    SDL_LockMutex(is->audioq.mutex);
+    audio_time_base_valid = is->audio_st->time_base.den > 0 && is->audio_st->time_base.num > 0;
+    nb_packets = is->audioq.nb_packets;
+    if (audio_time_base_valid) {
+        if (is->audioq.first_pkt && is->audioq.last_pkt) {
+			int64_t duration = is->audioq.last_pkt->pkt.pts - is->audioq.first_pkt->pkt.pts;
+			cached_duration = duration * av_q2d(is->audio_st->time_base) * 1000;
+        }
+    }
+    if (ffp->max_cached_duration > 0 && cached_duration > (ffp->max_cached_duration)) {
+		av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->print drop frame (audio)----------------->start\n");
+		int64_t diff_pts  = cached_duration - ffp->max_cached_duration;
+        drop_to_pts = is->audioq.first_pkt->pkt.pts + IJKMAX(0, diff_pts);
+		av_log(NULL, AV_LOG_DEBUG,
+			"ExoStreamer->ffplay->print audio cached_duration = %lld, max_cached_duration = %lld, first_pk_pts = %lld, last_pk_pts = %lld, nb_packets = %d, target drop_to_pts = %lld, diff_pts = %lld\n",
+			cached_duration,
+			ffp->max_cached_duration,
+			is->audioq.first_pkt->pkt.pts,
+			is->audioq.last_pkt->pkt.pts,
+			nb_packets,
+			drop_to_pts,
+			diff_pts);
+		exo_drop_queue_until_pts(0, &is->audioq, drop_to_pts);
+		av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->print drop frame (audio)----------------->end\n");
+    }
+    SDL_UnlockMutex(is->audioq.mutex);
+}
+
+static void exo_control_queue_duration(FFPlayer *ffp, VideoState *is) {
+    if (ffp->max_cached_duration <= 0) {
+        return;
+    }
+	if(ffp->drop_frame_mode == DROP_FRAME_MODE_ONLY_AUDIO) {
+		if (is->audio_st) {
+	       exo_control_audio_queue_duration(ffp, is);
+	    }
+	}
+	else { //DROP_FRAME_MODE_AUDIO_AND_VIDEO
+		if (is->audio_st) {
+			exo_control_audio_queue_duration(ffp, is);
+	    }
+		if (is->video_st) {
+			exo_control_video_queue_duration(ffp, is);
+		}
+	}
+}
+//Added By ExoStreamer for low delay end
 
 #if CONFIG_AVFILTER
 static inline
@@ -3060,6 +3242,8 @@ static int is_realtime(AVFormatContext *s)
 /* this thread gets the stream from the disk or the network */
 static int read_thread(void *arg)
 {
+	uint64_t before_read_thread = SDL_GetTickHR();
+
     FFPlayer *ffp = arg;
     VideoState *is = ffp->is;
     AVFormatContext *ic = NULL;
@@ -3089,8 +3273,8 @@ static int read_thread(void *arg)
     is->last_audio_stream = is->audio_stream = -1;
     is->last_subtitle_stream = is->subtitle_stream = -1;
     is->eof = 0;
-
     ic = avformat_alloc_context();
+	av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay-> first frame avformat_alloc_context diff = %lld\n", SDL_GetTickHR() - before_read_thread);
     if (!ic) {
         av_log(NULL, AV_LOG_FATAL, "Could not allocate context.\n");
         ret = AVERROR(ENOMEM);
@@ -3116,7 +3300,9 @@ static int read_thread(void *arg)
 
     if (ffp->iformat_name)
         is->iformat = av_find_input_format(ffp->iformat_name);
+	av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay-> first frame av_find_input_format diff = %lld\n", SDL_GetTickHR() - before_read_thread);
     err = avformat_open_input(&ic, is->filename, is->iformat, &ffp->format_opts);
+	av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay-> first frame avformat_open_input diff = %lld\n", SDL_GetTickHR() - before_read_thread);
     if (err < 0) {
         print_error(is->filename, err);
         ret = -1;
@@ -3163,8 +3349,15 @@ static int read_thread(void *arg)
                     break;
                 }
             }
+			
+			if(ffp->max_cached_duration > 0) { //ExoStreamer modify for loading time
+				ic->fps_probe_size = 0;
+			}
+			
             err = avformat_find_stream_info(ic, opts);
         } while(0);
+		av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay-> first frame avformat_find_stream_info diff = %lld \n", SDL_GetTickHR() - before_read_thread);
+		
         ffp_notify_msg1(ffp, FFP_MSG_FIND_STREAM_INFO);
 
         for (i = 0; i < orig_nb_streams; i++)
@@ -3208,7 +3401,19 @@ static int read_thread(void *arg)
         }
     }
 
-    is->realtime = is_realtime(ic);
+    //is->realtime = is_realtime(ic); Marked
+	if(ffp->max_cached_duration <= 0) {
+		ffp->max_cached_duration = 0;
+		is->realtime = is_realtime(ic);
+	} else {
+		is->realtime = 0;
+	}
+
+	if(ffp->check_drop_frame_interval <= 0) {
+		ffp->check_drop_frame_interval = DEFAULT_DROP_FRAME_DELAY_MILLISECONDS;
+	}
+	av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->max cached duration = %lld\n", ffp->max_cached_duration);
+	//Added By UCloud for live low delay opt end author ---> lw.tan
 
     av_dump_format(ic, 0, is->filename, 0);
 
@@ -3597,6 +3802,16 @@ static int read_thread(void *arg)
             av_packet_unref(pkt);
         }
 
+		if(ffp->max_cached_duration > 0 && pkt_in_play_range && !is->buffering_on) { //Added By ExoStreamer for live low delay start author ---> lw.tan
+			uint64_t current_time = SDL_GetTickHR();
+			if(current_time - is->last_check_drop_frame_time > ffp->check_drop_frame_interval * 1000) {
+				av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay->current_time = %lld, is->last_check_drop_frame_time = %lld\n", current_time, is->last_check_drop_frame_time);
+				is->last_check_drop_frame_time = current_time;
+				exo_control_queue_duration(ffp, is);				
+			}
+		}//Added By ExoStreamer for live low delay end author ---> lw.tan
+							
+
         ffp_statistic_l(ffp);
 
         if (ffp->ijkmeta_delay_init && !init_ijkmeta &&
@@ -3604,8 +3819,8 @@ static int read_thread(void *arg)
             ijkmeta_set_avformat_context_l(ffp->meta, ic);
             init_ijkmeta = 1;
         }
-
-        if (ffp->packet_buffering) {
+		//av_log(NULL, AV_LOG_DEBUG, "ExoStreamer->ffplay-> = %ld(us) & stat.audio_cache = %ld(us) pkt_in_play_range = %d is->audio_st = %d, is->video_st = %d\n", ffp->stat.video_cache.duration, ffp->stat.audio_cache.duration, pkt_in_play_range, is->audio_st == NULL ? 0 : 1, is->video_st == NULL ? 0 : 1);//Added By ExoStreamer for debug
+		if (ffp->packet_buffering) {
             io_tick_counter = SDL_GetTickHR();
             if ((!ffp->first_video_frame_rendered && is->video_st) || (!ffp->first_audio_frame_rendered && is->audio_st)) {
                 if (abs((int)(io_tick_counter - prev_io_tick_counter)) > FAST_BUFFERING_CHECK_PER_MILLISECONDS) {
@@ -4573,6 +4788,7 @@ void ffp_toggle_buffering_l(FFPlayer *ffp, int buffering_on)
     if (buffering_on && !is->buffering_on) {
         av_log(ffp, AV_LOG_DEBUG, "ffp_toggle_buffering_l: start\n");
         is->buffering_on = 1;
+		is->buffering_start_time = SDL_GetTickHR();//Added By ExoStreamer for low delay ---> author lw.tan
         stream_update_pause_l(ffp);
         if (is->seek_req) {
             is->seek_buffering = 1;
@@ -4583,6 +4799,7 @@ void ffp_toggle_buffering_l(FFPlayer *ffp, int buffering_on)
     } else if (!buffering_on && is->buffering_on){
         av_log(ffp, AV_LOG_DEBUG, "ffp_toggle_buffering_l: end\n");
         is->buffering_on = 0;
+		is->buffering_end_time = SDL_GetTickHR();//Added By ExoStreamer for low delay ---> author lw.tan
         stream_update_pause_l(ffp);
         if (is->seek_buffering) {
             is->seek_buffering = 0;
@@ -4820,6 +5037,61 @@ int ffp_get_video_rotate_degrees(FFPlayer *ffp)
 
     return theta;
 }
+
+/********Added by ExoStreamer for get current draw video bitmap  start **********/
+int ffp_get_current_frame(FFPlayer *ffp, uint8_t *frame_buf)
+{
+	if (ffp == NULL) {
+		av_log(ffp, AV_LOG_DEBUG, "ExoStreamer->ffplay->getCurrentFrame->state error.\n");
+		return -1;
+	}
+    //1.color format check
+    //TODO more color format support next step.
+	switch (ffp->overlay_format) {
+			case SDL_FCC_RV32:
+				break;
+			default:
+				av_log(ffp, AV_LOG_ERROR, "ExoStreamer->ffplay->getCurrentFrame: unknown chroma fourcc: %d, just support %d\n", ffp->overlay_format, SDL_FCC_RV32);
+				return -2;
+	}
+
+	//2.video decode mode check, current just support video software decode
+	//TODO impl hardware decode support next step
+
+	if(ffp->stat.vdec_type == FFP_PROPV_DECODER_MEDIACODEC) {
+		av_log(ffp, AV_LOG_ERROR, "ExoStreamer->ffplay->getCurrentFrame->don't support avc_codec = %d or hevc_code = %d\n", ffp->mediacodec_avc, ffp->mediacodec_hevc);
+		return -3;
+	}
+
+	Frame *vp;
+	int i = 0, linesize = 0, pixels = 0;
+	uint8_t *src;
+
+	vp = &ffp->is->pictq.queue[ffp->is->pictq.rindex];
+
+    if(vp == NULL || vp->bmp == NULL || vp->bmp->pixels[0] == NULL) {
+		return -4;
+    }
+
+	src = vp->bmp->pixels[0];
+	
+	int height = vp->bmp->h;
+	int width = vp->bmp->w;
+	linesize = vp->bmp->pitches[0];
+	
+	av_log(ffp, AV_LOG_DEBUG, "ExoStreamer->ffplay->getCurrentFrame->%d X %d === %d\n", width, height, linesize);
+
+	//3.copy data to bitmap in java code
+	//TODO impl other color formats data copy & convert
+	pixels = width * 4;
+	for (i = 0; i < height; i++) {
+		memcpy(frame_buf + i * pixels, src + i * linesize, pixels);
+	}
+	return 0;
+}
+
+/********Added by ExoStreamer for get current draw video bitmap  end **********/
+
 
 int ffp_set_stream_selected(FFPlayer *ffp, int stream, int selected)
 {

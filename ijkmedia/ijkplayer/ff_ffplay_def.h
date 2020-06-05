@@ -76,7 +76,6 @@
 #define DEFAULT_FIRST_HIGH_WATER_MARK_IN_MS     (100)
 #define DEFAULT_NEXT_HIGH_WATER_MARK_IN_MS      (1 * 1000)
 #define DEFAULT_LAST_HIGH_WATER_MARK_IN_MS      (5 * 1000)
-
 #define BUFFERING_CHECK_PER_BYTES               (512)
 #define BUFFERING_CHECK_PER_MILLISECONDS        (500)
 #define FAST_BUFFERING_CHECK_PER_MILLISECONDS   (50)
@@ -93,6 +92,16 @@
 #define MIN_FRAMES (ffp->dcc.min_frames)
 #define EXTERNAL_CLOCK_MIN_FRAMES 2
 #define EXTERNAL_CLOCK_MAX_FRAMES 10
+#define DEFAULT_CACHED_DURATION                 (0)               //Added By ExoStreamer for low delay author --->lw.tan
+#define DEFAULT_MIN_CACHED_DURATION             (0)               //Added By ExoStreamer for low delay author --->lw.tan
+#define DEFAULT_MAX_CACHED_DURATION             (60 * 1000)       //Added By ExoStreamer for low delay author --->lw.tan
+
+#define DEFAULT_MIN_DROP_FRAME_DELAY_MILLISECONDS             (0)               //Added By ExoStreamer for low delay author --->lw.tan
+#define DEFAULT_MAX_DROP_FRAME_DELAY_MILLISECONDS             (5 * 1000 * 60)   //Added By ExoStreamer for low delay author --->lw.tan
+#define DEFAULT_DROP_FRAME_DELAY_MILLISECONDS   (20 * 1000) //Added By ExoStreamer for low delay author --->lw.tan
+#define DROP_FRAME_MODE_ONLY_AUDIO      (0) //Added By ExoStreamer for drop frame mode author --->lw.tan
+#define DROP_FRAME_MODE_AUDIO_AND_VIDEO (1) //Added By ExoStreamer for drop frame mode author --->lw.tan
+#define DEFAULT_DROP_FRAME_MODE (1) //Added By ExoStreamer for drop frame mode author --->lw.tan
 
 /* Minimum SDL audio buffer size, in samples. */
 #define SDL_AUDIO_MIN_BUFFER_SIZE 512
@@ -295,9 +304,9 @@ typedef struct VideoState {
     Clock vidclk;
     Clock extclk;
 
-    FrameQueue pictq;
+    FrameQueue pictq;//Note By ExoStreamer picture frame decoded
     FrameQueue subpq;
-    FrameQueue sampq;
+    FrameQueue sampq;//Note By ExoStreamer audio frame decoded
 
     Decoder auddec;
     Decoder viddec;
@@ -314,7 +323,7 @@ typedef struct VideoState {
     double audio_diff_threshold;
     int audio_diff_avg_count;
     AVStream *audio_st;
-    PacketQueue audioq;
+    PacketQueue audioq;//Note By ExoStreamer audio packet frame no decode
     int audio_hw_buf_size;
     uint8_t *audio_buf;
     uint8_t *audio_buf1;
@@ -363,7 +372,7 @@ typedef struct VideoState {
     double frame_last_filter_delay;
     int video_stream;
     AVStream *video_st;
-    PacketQueue videoq;
+    PacketQueue videoq;//Note By ExoStreamer video packet frame no decode
     double max_frame_duration;      // maximum duration of a frame - above this, we consider the jump a timestamp discontinuity
     struct SwsContext *img_convert_ctx;
 #ifdef FFP_SUB
@@ -418,6 +427,11 @@ typedef struct VideoState {
     SDL_cond  *audio_accurate_seek_cond;
     volatile int initialized_decoder;
     int seek_buffering;
+	
+	int64_t buffering_start_time;       //Added By ExoStreamer for low delay author ---> lw.tan
+	int64_t buffering_end_time;         //Added By ExoStreamer for low delay author ---> lw.tan
+	uint64_t last_check_drop_frame_time; //Added By ExoStreamer for low delay author ---> lw.tan
+	int is_need_fast_drop_frame;        //Added By ExoStreamer for low delay author ---> lw.tan
 } VideoState;
 
 /* options specified by the user */
@@ -720,6 +734,10 @@ typedef struct FFPlayer {
     char *mediacodec_default_name;
     int ijkmeta_delay_init;
     int render_wait_start;
+	
+	int64_t max_cached_duration;       //Added By ExoStreamer for low delay --->author lw.tan
+	int64_t check_drop_frame_interval; //Added By ExoStreamer for low delay --->author lw.tan
+	int64_t drop_frame_mode;           //Added By ExoStreamer for drop frame mode --->author lw.tan
 } FFPlayer;
 
 #define fftime_to_milliseconds(ts) (av_rescale(ts, 1000, AV_TIME_BASE))
@@ -831,6 +849,7 @@ inline static void ffp_reset_internal(FFPlayer *ffp)
     ffp->ijkmeta_delay_init             = 0; // option
     ffp->render_wait_start              = 0;
 
+     ffp->max_cached_duration = DEFAULT_MAX_CACHED_DURATION; //Added By ExoStreamer for low delay --->author lw.tan
     ijkmeta_reset(ffp->meta);
 
     SDL_SpeedSamplerReset(&ffp->vfps_sampler);

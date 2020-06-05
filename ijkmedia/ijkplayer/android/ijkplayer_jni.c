@@ -286,6 +286,9 @@ static void
 IjkMediaPlayer_stop(JNIEnv *env, jobject thiz)
 {
     IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+	if(!mp) {
+		return;
+	}
     JNI_CHECK_GOTO(mp, env, "java/lang/IllegalStateException", "mpjni: stop: null mp", LABEL_RETURN);
 
     ijkmp_stop(mp);
@@ -298,6 +301,9 @@ static void
 IjkMediaPlayer_pause(JNIEnv *env, jobject thiz)
 {
     IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+	if(!mp) {
+		return;
+	}
     JNI_CHECK_GOTO(mp, env, "java/lang/IllegalStateException", "mpjni: pause: null mp", LABEL_RETURN);
 
     ijkmp_pause(mp);
@@ -311,6 +317,9 @@ IjkMediaPlayer_seekTo(JNIEnv *env, jobject thiz, jlong msec)
 {
     MPTRACE("%s\n", __func__);
     IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+	if(!mp) {
+		return;
+	}
     JNI_CHECK_GOTO(mp, env, "java/lang/IllegalStateException", "mpjni: seekTo: null mp", LABEL_RETURN);
 
     ijkmp_seek_to(mp, msec);
@@ -324,6 +333,9 @@ IjkMediaPlayer_isPlaying(JNIEnv *env, jobject thiz)
 {
     jboolean retval = JNI_FALSE;
     IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+	if(!mp) {
+		return JNI_FALSE;
+	}
     JNI_CHECK_GOTO(mp, env, NULL, "mpjni: isPlaying: null mp", LABEL_RETURN);
 
     retval = ijkmp_is_playing(mp) ? JNI_TRUE : JNI_FALSE;
@@ -333,11 +345,48 @@ LABEL_RETURN:
     return retval;
 }
 
+static jboolean
+IjkMediaPlayer_getCurrentVideoBitmap(JNIEnv *env, jobject thiz, jobject bitmap)//Added By ExoStreamer
+{
+	jboolean retval = JNI_TRUE;
+	IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+
+	if(mp == NULL) {
+		return JNI_FALSE;
+	}
+
+	uint8_t *frame_buffer = NULL;
+
+	if (0 > AndroidBitmap_lockPixels(env, bitmap, (void **)&frame_buffer)) {
+		ALOGD("ExoStreamer->ffplay->getCurrentFrame->Unable to lock pixels.");
+		return JNI_FALSE;
+	}
+
+	int isSucceed = ijkmp_get_current_frame(mp, frame_buffer);
+
+	if (0 > AndroidBitmap_unlockPixels(env, bitmap)) {
+		ALOGD("ExoStreamer->ffplay->getCurrentFrame->Unable to unlock pixels.");
+		return JNI_FALSE;
+	}
+
+	if (isSucceed < 0) {
+		return JNI_FALSE;
+	}
+
+	LABEL_RETURN:
+	ijkmp_dec_ref_p(&mp);
+    return retval;
+}
+
+
 static jlong
 IjkMediaPlayer_getCurrentPosition(JNIEnv *env, jobject thiz)
 {
     jlong retval = 0;
     IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+	if(!mp) {
+		return 0;
+	}
     JNI_CHECK_GOTO(mp, env, NULL, "mpjni: getCurrentPosition: null mp", LABEL_RETURN);
 
     retval = ijkmp_get_current_position(mp);
@@ -352,6 +401,9 @@ IjkMediaPlayer_getDuration(JNIEnv *env, jobject thiz)
 {
     jlong retval = 0;
     IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+	if(!mp) {
+		return 0;
+	}
     JNI_CHECK_GOTO(mp, env, NULL, "mpjni: getDuration: null mp", LABEL_RETURN);
 
     retval = ijkmp_get_duration(mp);
@@ -567,6 +619,10 @@ IjkMediaPlayer_setOptionLong(JNIEnv *env, jobject thiz, jint category, jobject n
     JNI_CHECK_GOTO(mp, env, "java/lang/IllegalStateException", "mpjni: setOptionLong: null mp", LABEL_RETURN);
 
     c_name = (*env)->GetStringUTFChars(env, name, NULL );
+	/**
+	   增加参数值输出
+	  **/
+	MPTRACE("%s = %"PRId64"\n", c_name, (int64_t)value);
     JNI_CHECK_GOTO(c_name, env, "java/lang/OutOfMemoryError", "mpjni: setOptionLong: name.string oom", LABEL_RETURN);
 
     ijkmp_set_option_int(mp, category, c_name, value);
@@ -1159,6 +1215,7 @@ static JNINativeMethod g_methods[] = {
     { "native_init",            "()V",      (void *) IjkMediaPlayer_native_init },
     { "native_setup",           "(Ljava/lang/Object;)V", (void *) IjkMediaPlayer_native_setup },
     { "native_finalize",        "()V",      (void *) IjkMediaPlayer_native_finalize },
+	{ "getCurrentVideoBitmap", "(Landroid/graphics/Bitmap;)Z", (void *) IjkMediaPlayer_getCurrentVideoBitmap },
 
     { "_setOption",             "(ILjava/lang/String;Ljava/lang/String;)V", (void *) IjkMediaPlayer_setOption },
     { "_setOption",             "(ILjava/lang/String;J)V",                  (void *) IjkMediaPlayer_setOptionLong },

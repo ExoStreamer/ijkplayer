@@ -21,14 +21,25 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            ndk {
+//                abiFilters 'armeabi', 'armeabi-v7a', 'arm64-v8a', 'x86'
+                abiFilters 'armeabi-v7a'
+            }
+        }
+        debug {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            ndk {
+                abiFilters 'armeabi-v7a'
+            }
         }
     }
     flavorDimensions "0.8.8"
     productFlavors {
-        all32 { minSdkVersion rootProject.ext.minSdkVersion }
+//        all32 { minSdkVersion rootProject.ext.minSdkVersion }
 //        all64 { minSdkVersion rootProject.ext.minSdkVersion }
 //         armv5 {}
-        // armv7a {}
+         armv7a {}
         // arm64 { minSdkVersion rootProject.ext.minSdkVersion }
         // x86 {}
     }
@@ -44,7 +55,7 @@ dependencies {
 
     implementation project(':ijkplayer-java')
     implementation project(':ijkplayer-exo')
-
+    implementation project(':ijkplayer-armv7a')
 /*    all32Implementation project(':ijkplayer-armv5')
     all32Implementation project(':ijkplayer-armv7a')
     all32Implementation project(':ijkplayer-x86')*/

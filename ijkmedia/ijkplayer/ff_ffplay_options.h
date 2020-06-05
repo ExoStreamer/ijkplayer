@@ -164,6 +164,12 @@ static const AVOption ffp_context_options[] = {
         OPTION_OFFSET(async_init_decoder),   OPTION_INT(0, 0, 1) },
     { "video-mime-type",                    "default video mime type",
         OPTION_OFFSET(video_mime_type),     OPTION_STR(NULL) },
+	{ "max-cached-duration",        "live low delay opt", //Added By ExoStreamer for low delay author --->lw.tan
+        OPTION_OFFSET(max_cached_duration), OPTION_INT(DEFAULT_CACHED_DURATION, DEFAULT_MIN_CACHED_DURATION, DEFAULT_MAX_CACHED_DURATION)},
+    { "check-drop-frame-interval",		"live low delay opt", //Added By ExoStreamer for low delay author --->lw.tan
+			OPTION_OFFSET(check_drop_frame_interval), OPTION_INT(DEFAULT_DROP_FRAME_DELAY_MILLISECONDS, DEFAULT_MIN_DROP_FRAME_DELAY_MILLISECONDS, DEFAULT_MAX_DROP_FRAME_DELAY_MILLISECONDS)},
+	{ "drop-frame-mode",		"drop frame mode opt", //Added By ExoStreamer for drop frame mode author --->lw.tan
+				OPTION_OFFSET(drop_frame_mode), OPTION_INT(DEFAULT_DROP_FRAME_MODE, DROP_FRAME_MODE_ONLY_AUDIO, DROP_FRAME_MODE_AUDIO_AND_VIDEO)},
 
         // iOS only options
     { "videotoolbox",                       "VideoToolbox: enable",
